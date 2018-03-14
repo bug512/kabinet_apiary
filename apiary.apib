@@ -1,0 +1,1614 @@
+FORMAT: 1A
+HOST: https://kabinet.dreamkas.ru/api
+
+
+# Кабинет Дримкас API
+
+
+В данной документации содержится описание публичных методов для работы с [Кабинетом Дримкас](https://kabinet.dreamkas.ru).
+
+При разработке API мы стараемся максимально следовать *RESTful* принципам.
+
+Поддерживаемые форматы:
+- **JSON** (application/json)
+
+
+# 1 Авторизация
+
+
+Для вызова большинства методов требуется авторизация. Кабинет поддерживает следующие способы:
+
+
+## Cookies
+
+
+Этот режим используется по умолчанию. Когда пользователь авторизовался в Кабинете, 
+он может использовать все доступные методы API без передачи дополнительных параметров
+
+
+## HTTP Авторизация
+
+
+Этот способ рекомендуется использовать для программиного взаимодействия 
+(интеграция, написание клиентских библиотек, и т.д.).
+
+В каждом запросе необходимо передавать заголовок `Authorization` (или `X-Authorization`).
+
+- **Bearer**
+
+    Этот тип авторизации является частью OAuth2 авторизации (описана ниже).
+    
+    `Authorization: Bearer ACCESS_TOKEN`
+    
+    где `ACCESS_TOKEN` - ключ, полученный приложением в результате OAuth2 авторизации.
+    
+    > Этот способ используется приложениями, которые хотят управлять кабинетом пользователя.
+    
+- **Application**
+
+    Этот тип авторизации происходит по паре `client_id`+`client_secret`.
+    
+    `Authorization: Application {base64("client_id:client_secret")}`.
+    
+    Этот способ авторизации, практически, идентичен классической базовой (Basic) авторизации.
+    
+    Может понадобиться интеграторам для вызова специфических методов (например, для создания пользователей).
+    
+## Basic Auth
+
+Базовая авторизация подходит для случаев, когда у приложения есть конфиденциальные данные пользователя, а именно логин и пароль в открытом виде, и хочет произвести запрос с авторизацией.
+
+Для этого достаточно передать в заголовках запроса `Authorization: Basic xxxyyy`, где `xxxyyy` - это base64(login:password)
+
+Например, логин - `Aladdin`, пароль - `OpenSesame`. Тогда нужно получить строку `Aladdin:OpenSesame`, взять от неё base64 и получить `QWxhZGRpbjpPcGVuU2VzYW1l`
+
+В конечном итоге заголовок будет: `Authorization: Basic QWxhZGRpbjpPcGVuU2VzYW1l`
+
+Подробнее можете узнать в [Википедии](https://en.wikipedia.org/wiki/Basic_access_authentication)
+
+
+# 2 Polling
+
+Выполнение некоторых запросов к API может занимать достаточно продолжительное время (например, фискализация чека) и держать подключение открытым все это время очень невыгодно.
+Решить эту проблему помогает т.н. polling. При запросе вы сразу же получаете уникальный идентификатор операции, а сам запрос попадает в очередь на выполнение. Следить за статусом выполнения запроса вы можете
+через специальное API (см. Операции). Методы API, работающие по такому принципу возвращают HTTP-статус `202 Accepted`.
+
+Этот метод рекомендуется использовать только в тех случаях, когда нет возможности использовать вебхуки (например в десктопных приложениях, на компьютерах с серыми IP адресами и т.д.).
+
+# 3 Webhooks
+
+Вебхуки предоставляют возможность получать актуальную информацию о некоторых сущностях от Кабинета. 
+В отличие от Polling, где Ваша система должна запрашивать от Кабинета информацию каждый раз, вебхуки сделают это сразу после события (например, создание товара, пробитие чека, ...).
+
+В рамках данного API у Вас есть возможность подписаться на нужное событие и указать обратную ссылку для её вызова Кабинетом.
+
+Таким образом, Вы можете сразу узнать, например,  о пробитии нового чека кассой.
+
+# 4 Handling errors
+
+Кабинет возвращает ошибки с HTTP кодом, следуя стандартам [RFC](https://tools.ietf.org/html/rfc7231).
+Клиентские ошибки(4хх) возвращаются с пояснениями.
+Например, при создании товара с пустым наименованием: 
+
+    + Тело запроса
+
+        { 
+            "name": ""
+        }
+    
+Вы получите ошибку: `HTTP 400`
+
+    + Тело ответа
+
+        {
+            "status": 400,
+            "code": "E_VALIDATION_FAILED",
+            "message": "Ошибка валидации",
+            "data": {
+                "errors": [
+                    {
+                        "code": "E_PRODUCT_NAME_EMPTY",
+                        "message": "Наименование товара не должно быть пустым"
+                    }
+                ]
+            }
+        }
+Обратите внимание, что в массиве `errors` может быть более одной ошибки
+
+
+# 5 Обработка чеков из Интернет-магазинов
+
+## Требования:
+
+1. Наличие кассы "Дримкас-Ф"
+2. Привязка кассы Кабинету
+3. Наличие ФН в кассе, в боевом режиме: ни учебный, ни ЕНВД не подойдет. Если это критично, пишите письмо на имя PO - e.uskov@dreamkas.ru
+
+Данная операция является асинхронной, так как ККТ Дримкас-Ф выходит на связь раз в минуту, или вообще может не иметь сети интернет на момент запроса со стороны Интернет-Магазина(далее - ИМ)
+
+## Шаги сценария:
+
++ `HTTP POST /api/v1/receipts` с корректно сформированным телом. Убедитесь, что получили в ответ HTTP StatusCode = `202`, а не `400` и список ошибок валидации
++ В ответ получите идентификатор операции, статус которой будет меняться со временем
++ Узнать статус операции: два способа
+    + выполнив запрос на `/api/v1/operations/{id операции}`. Этот метод подходит для серверов без статического IP адреса
+    + по вебхукам
+    
+    Так как фискализация чека - это операция, соответсвенно обновления статуса фискализации будут отображаться как изменения статуса операции
+    
+    На эти обновления можно подписаться и получать вебхуки сразу, как только что-то изменится
+    
+    подробнее в разделе webhooks, с учетом, что в теле вебхука в `data` будет то же самое, что Вы получаете от `/api/operations/:id`
++ Убедиться, что получили статус `SUCCESS`
+
+
+## Набор всех возможных ошибок:
+`REM_ID_IS_EMPTY` - отсутствует rem id(внутренняя ошибка)
+
+`TAX_MODE_IS_EMPTY` - не указана СНО
+
+`UNKNOWN_DOCUMENT_TYPE` - неверный тип документа (приход/расход, возврат прихода/расхода)
+
+`UNKNOWN_POSITION_TYPE` - неверный тип позиции (штучный, весовой)
+
+`WRONG_PAYMENT_TYPE` - неверный тип оплаты (нал/безнал)
+
+`UNSUPPORTED_PAYMENT_TYPE` - одновременная оплата нал и безнал невозможна
+
+`KKT_NOT_AUTHORIZED` - ККТ не авторизована (нет пользователя)
+
+`FS_CONNECTION_ERROR` - отсутствие связи с ФН
+
+`KKT_NOT_FISCAL` - нефискальный режим
+
+`SHIFT_IS_CLOSE` - смена закрыта
+
+`OFD_DISCONNECT_30_DAYS` - отсутствует связь с ОФД 30 дней (фискализация чеков невозможна)
+
+`FS_TIMEOUT` - таймаут ФН
+
+`FS_WRONG_DATE` - неверная дата и время
+
+`FS_SHIFT_MORE_THEN_24H` - смена более 24 ч
+
+`null` - что-то пошло совсем не так, пишите разработчикам - [t.me/apidreamkas](https://t.me/apidreamkas)
+
+## Часто возникающие проблемы
+- Неверно сформирован запрос. В таком случае сервер не вернет идентификатор операции и чек не улетит на кассу
+- Разработчик не имеет понятия, что такое операции, как с ними работать. Читайте шаги сценария, пункт 2
+- Вы видите `PENDING` и не знаете, что с ним делать? Обновите статус операции, рано или поздно он изменится либо на `SUCCESS`, либо на `ERROR`
+- Вы видите `ERROR` и не понимаете, что с ним делать? В свойстве `data` указана подробная причина проблемы. Если указано error: null - пишите разработчикам - [t.me/apidreamkas](https://t.me/apidreamkas)
+- Смена на кассе закрывается в самый ненужный момент? Укажите в настройках ККТ включить опцию "автооткрытие смены"
+- Отправка чека два раза подряд. Для Кабинета каждое отправленное задание будет проходить обработку. Вам необходимо контролировать это на своей стороне.
+
+
+
+
+# Group OAuth2
+
+
+Для интеграции со сторонними сервисами Кабинет Дримкас поддерживает OAuth2 авторизацию. Простейший пример реализации на *Node.js* можно 
+найти [здесь](https://github.com/dreamkas/kabinet_oauth2_example).
+
+> Для начала работы вам потребуется `client_id` и `client_secret`. Эти данные нужно попросить у
+администраторов Кабинета.
+
+Разработчик приложения должен разместить на своем ресурсе ссылку на запрос авторизации.
+
+
+## Запрос авторизации [GET /oauth2/authorize{?client_id,redirect_uri}]
+
+
+Пользователю будет предложено подтвердить авторизацию, после чего он будет перенаправлен 
+на обработчик результата (параметр `redirect_uri`).
+
+В обработчике следует проверить наличие параметров `code` и `error`.
+
+Если `code` пришел, а `error` пустой, то пользователь подтвердил авторизацию и нужно получить
+для него `access_token` с использованием которого ваше приложение сможет осуществлять действия
+в аккаунте пользователя Кабинета.
+
++ Parameters
+    + client_id: 1 (number) - Идентификатор клиента
+    + redirect_uri: `http://localhost/?uid=123` (string) - Обработчик результата авторизации
+
++ Response 302
+    + Headers
+
+            Location: http://localhost/?uid=123&code=1234567890
+
+
+## Получение токена [POST /oauth2/access_token]
+
+
+Полученный для пользователя `access_token` следует сохранить.
+
+> Токен не имеет ограничения по времени действия. Однако, пользователь в дальнейшем может отменить интеграцию, отключив ее в Кабинете Дримкас.
+В этом случае ваше приложение больше не сможет управлять аккаунтом конкретного пользователя до 
+тех пор, пока тот заново не авторизуется. Следует предусмотреть такой исход и не "бомбить"
+наш сервис бесполезными запросами.
+
++ Request (application/json)
+    + Attributes
+        + code (string) - Код, полученный на предыдущем шаге
+        + client_id (number) - Идентификатор приложения
+        + client_secret (string) - Секретный ключ приложения
+
+
+    + Body
+
+            {
+                "code": "1234567890",
+                "client_id": 1,
+                "client_secret": "0aa9e134-b2ed-451e-bb98-c7d91ee843f2"
+            }
+
++ Response 200 (application/json)
+    + Body
+
+            {
+                "access_token": "a047fb5a-9464-4267-ac47-8c47ad100e27"
+            }
+            
++ Response 403 (application/json)
+    + Body
+    
+            {
+                "statusCode": 403,
+                "error": "Forbidden",
+                "message": "Bad Code"
+            }
+
+
+
+# Group Товары
+
+
+Предоставляет методы для управления товарами в аккаунте пользователя
+
+
+### Штрихкоды `barcodes`
+
+
+У штрихкодов длиной **8**, **12**, **13** символов проверяется контрольная сумма, 
+на соответствие *EAN-8*, *UPC*, *EAN-13* форматам соответственно
+
+Допускаются 5-значные цифровые строки для весовых товаров
+
+Все остальные вариации можно хранить в vendorCodes - артикулы
+
+
+### Единица товара `quantity`
+
+
+Измеряется в тысячных и значение этого поля следует воспринимать по-разному, в завимисости от типа товара `type`
+
+Примеры:
+
+type       | quantity | значение
+-----------|----------|---------
+SCALABLE   | 1        | 1 грамм
+SCALABLE   | 200      | 200 грамм
+SCALABLE   | 1000     | 1 кг
+COUNTABLE  | 1000     | 1 шт
+ALCOHOL    | 1000     | 1 бутылка/банка
+
+Если алкоголь продается в розлив, то нужно установить параметр `volume = 0`,
+тогда значение `quantity = 200`, будет означать, что продукт продается в розлив по *200 мл*
+
+
+## /products
+
+
+### Список товаров [GET /products{?limit,offset}]
+
++ Parameters
+    + limit: 100 (optional, number) - Количество записей в ответе (если не указан, то вернутся все товары)
+    + offset: 0 (optional, number) - Смещение
+
+
++ Response 200 (application/json)
+    + Attributes (array[Product])
+
+
+### Создание товаров [POST]
+
+Данный метод поддерживает создание одного или нескольких товаров.
+Для создания одного товара тело запроса должно содержать объект с данными товара.
+Для создания нескольких товаров нужно передать массив вида ``[{ Товар 1 }, { Товар 2 }, { Товар3 }]``.
+
+При массовом добавлении товаров тело ответа содержит результат для каждого переданного товара.
+
++ Request Создание одного товара (application/json)
+    + Attributes (Product Editable Properties Common Version1)
+
++ Response 201 (application/json)
+    + Body
+
+            {
+                "id": "b0381fe4-4428-4dcb-8169-c8bbcab59626"
+            }
+
++ Request Создание нескольких товаров (application/json)
+    + Attributes (array[Product Editable Properties Common Version1])
+
++ Response 201 (application/json)
+    + Body
+
+            {
+                "result": {
+                    "0": {
+                        "id": 1
+                    }
+                },
+                "errors": {
+                    "1": {
+                        "status": 400,
+                        "code": "E_VALIDATION_FAILED",
+                        "message": "Ошибка валидации",
+                        "data": {
+                            "errors": [
+                                {
+                                    "code": "E_PRODUCT_INVALID_TAX",
+                                    "message": "Указан некорректный НДС"
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+            
+
+### Множественное редактирование [PATCH]
+
++ Attributes (array)
+    - (Product Editable Properties Common Version1)
+        + id (string) - Идентификатор редактируемого товара, UUID или число в строке: "10"
+
++ Request (application/json)
+
++ Response 204
+
+
+### Множественное удаление [DELETE]
+
++ Attributes (array)
+    - (object)
+        + id: `cdaafe3d-a89a-4f66-afb6-ac8277d54110` (string, sample) - Идентификатор удаляемого товара
+
++ Request (application/json)
+
++ Response 204
+
+
+## /products/{id}
+
+
++ Parameters
+    + id (string) - Идентификатор
+
+
+### Информация о товаре [GET]
+
+
++ Response 200 (application/json)
+    + Attributes (ProductV1)
+
+
+### Редактирование товара [PATCH]
+
+
++ Attributes (Product Editable Properties Common Version1)
+
++ Request (application/json)
+
++ Response 204
+
+
+### Удаление товара [DELETE]
+
+
++ Response 204
+
+
+# Group Товары V2
+
+
+## /v2/products
+
+
+### Список товаров [GET /V2/products{?limit,offset}]
+
++ Parameters
+    + limit: 100 (optional, number) - Количество записей в ответе, по умолчанию 100
+    + offset: 0 (optional, number) - Смещение
+
+
++ Response 200 (application/json)
+    + Attributes (array[ProductV2])
+
+
+### Создание товаров [POST]
+
+Данный метод поддерживает создание одного или нескольких товаров.
+Для создания одного товара тело запроса должно содержать объект с данными товара.
+Для создания нескольких товаров нужно передать массив вида ``[{ Товар 1 }, { Товар 2 }, { Товар 3 }]``.
+
+При массовом добавлении товаров тело ответа содержит результат для каждого переданного товара.
+
++ Request Создание одного товара (application/json)
+    + Attributes (Product Editable Properties Common Version2)
+
++ Response 201 (application/json)
+    + Body
+
+            {
+                "id": "b0381fe4-4428-4dcb-8169-c8bbcab59626"
+            }
+
++ Request Создание нескольких товаров (application/json)
+    + Attributes (array[Product Editable Properties Common Version2])
+
++ Response 201 (application/json)
+    + Body
+
+            {
+                "result": {
+                    "0": {
+                        "id": 1
+                    }
+                },
+                "errors": {
+                    "1": {
+                        "status": 400,
+                        "code": "E_VALIDATION_FAILED",
+                        "message": "Ошибка валидации",
+                        "data": {
+                            "errors": [
+                                {
+                                    "code": "E_PRODUCT_INVALID_TAX",
+                                    "message": "Указан некорректный НДС"
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+            
+
+### Множественное редактирование [PATCH]
+
++ Attributes (array)
+    - (Product Editable Properties Common Version2)
+        + id (string) - Идентификатор редактируемого товара, UUID или число в строке: "10"
+
++ Request (application/json)
+
++ Response 204
+
+
+### Множественное удаление [DELETE]
+
++ Attributes (array)
+    - (object)
+        + id: `cdaafe3d-a89a-4f66-afb6-ac8277d54110` (string, sample) - Идентификатор удаляемого товара
+
++ Request (application/json)
+
++ Response 204
+
+
+## /v2/products/{id}
+
+
++ Parameters
+    + id (string) - Идентификатор
+
+
+### Информация о товаре [GET]
+
+
++ Response 200 (application/json)
+    + Attributes (ProductV2)
+
+
+### Редактирование товара [PATCH]
+
+
++ Attributes (Product Editable Properties Common Version2)
+
++ Request (application/json)
+
++ Response 204
+
+
+### Удаление товара [DELETE]
+
+
++ Response 204
+
+
+# Group Магазины
+
+
+Предоставляет методы для управления магазинами пользователя.
+
+Основное предназначение магазинов - логическая группировка устройств в Кабинете
+
+
+## /shops
+
+
+### Список магазинов [GET]
+
++ Response 200 (application/json)
+    + Attributes (array[Shop])
+    
+
+### Создание магазина [POST]
+
+
++ Attributes (Shop Editable Properties)
+
++ Request (application/json)
+
++ Response 201 (application/json)
+    + Attributes (Shop)
+
+
+### Множественное редактирование [PATCH]
+
++ Attributes (array)
+    + (Shop Editable Properties)
+        + id: 1 (number, sample) - Идентификатор редактируемого магазина
+        
++ Request (application/json)
+
++ Response 204
+
+
+## /shops/{id}
+
+
++ Parameters
+    + id (number) - Идентификатор магазина
+    
+
+### Информация о магазине [GET]
+
++ Response 200 (application/json)
+    + Attributes (Shop)
+    
+
+### Редактирование магазина [PATCH]
+
++ Attributes (Shop Editable Properties)
+
++ Request (application/json)
+
++ Response 204
+
+
+### Удаление магазина [DELETE]
+
++ Response 204
+
+
+# Group Устройства
+
+
+Предоставляет методы для работы с подключенными устройствами
+
+
+## /devices
+
+### Список устройств [GET]
+
++ Response 200 (application/json)
+    + Attributes (array[Device])
+
++ Request (application/json)
+
++ Response 204
+
+
+## /devices/{id}
+
+
++ Parameters
+    + id (number) - Идентификатор устройства
+    
+
+### Информация об устройстве [GET]
+
++ Response 200 (application/json)
+    + Attributes (Device)
+    
+
+### Редактирование устройства [PATCH]
+
++ Attributes (Device Editable Properties)
+
++ Request (application/json)
+
++ Response 204
+
+
+
+#Group Отделы
+
+Предоставляет методы для управления отделами пользователя.
+
+Основное предназначение отделов - логическая группировка товаров в Кабинете
+
+## /departments
+
+### Список отделов [GET]
+
++ Response 200 (application/json)
+    + Attributes (array[Department])
+
++ Request (application/json)
+
++ Response 204
+
+### Создание отдела [POST]
+
++ Attributes (Department Editable)
+
++ Request (application/json)
+
++ Response 201 (application/json)
+    + Attributes (Department)
+
+## /departments/{id}
+
++ Parameters
+    + id (number) - Идентификатор отдела
+
+### Информация об отделе [GET]
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes (Department)
+
+
+### Редактирование отдела [PATCH]
+
++ Attributes (Department Editable)
+
++ Request (application/json)
+
++ Response 204 (application/json)
+
+### Удаление отдела [DELETE]
+
+    Удаление отдела не влечёт за собой удаление товаров внутри, они будут перенесены в отдел "Без отдела"
+
++ Response 204
+
+
+# Group Отделы V2
+
+Предоставляет методы для управления отделами пользователя.
+
+Основное предназначение отделов - логическая группировка товаров в Кабинете
+
+## /v2/departments
+
+### Список отделов [GET]
+
++ Response 200 (application/json)
+    + Attributes (array[Department v2])
+
++ Request (application/json)
+
++ Response 204
+
+### Создание отдела [POST]
+
++ Attributes (Department Editable v2)
+
++ Request (application/json)
+
++ Response 201 (application/json)
+    + Attributes (Department v2)
+
+## /v2/departments/{id}
+
++ Parameters
+    + id (number) - Идентификатор отдела
+
+### Информация об отделе [GET]
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes (Department v2)
+
+
+### Редактирование отдела [PATCH]
+
++ Attributes (Department Editable v2)
+
++ Request (application/json)
+
++ Response 204 (application/json)
+
+### Удаление отдела [DELETE]
+
+    Удаление отдела не влечёт за собой удаление товаров внутри, они будут перенесены в отдел "Без отдела"
+
++ Response 204
+
+
+# Group Чеки
+
+Набор методов для работы с чеками.
+
+## /receipts
+
+### Данные о продажах [GET /receipts{?from,to,limit,offset,devices}]
+
++ Parameters
+    + from: `2017-10-13T14:15:01.239Z` (optional, string) - Дата в ISO формате. По умолчанию 00:00:00 текущего дня
+    + to: `2017-10-14T14:15:01.239Z` (optional, string) - Дата в ISO формате. По умолчанию 23:59:59 текущего дня
+    + offset: 0 (optional, number) - Смещение
+    + limit: 200 (optional, number) - Количество. Максимальное значение 1000
+    + devices: `1,2,3` (optional, string) - список идентификаторов устройств
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes (Receipt)
+
+### Фискализация чека (только для Дримкас-Ф) [POST]
+
+Операция фискализации чека является асинхронным запросом, поэтому может потребовать больше времени, чем стандартный таймаут HTTP запроса
+
+Так устроено, что кассы ходят за новыми чеками для фискализации раз в минуту. Поэтому в среднем время ожидания печати чека около 30 секунду.
+
++ Attributes (Receipt Request)
+
++ Request (application/json)
+
++ Response 202 (application/json)
+    + Attributes (Operation Header)
+
+
+# Group Внесения/Изъятия
+
+
+Возвращает информацию о внесениях и изъятиях за определенный интервал времени
+
+
+## /encashments{?from,to,limit,offset,devices}
+
+### Данные о внесениях и изъятиях [GET]
+
++ Parameters
+    + from: `2017-10-13T14:15:01.239Z` (optional, string) - Дата в ISO формате. По умолчанию 00:00:00 текущего дня
+    + to: `2017-10-14T14:15:01.239Z` (optional, string) - Дата в ISO формате. По умолчанию 23:59:59 текущего дня
+    + offset: 0 (optional, number) - Смещение
+    + limit: 200 (optional, number) - Количество. Максимальное значение 1000
+    + devices: `1,2,3` (optional, string) - список идентификаторов устройств
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes (Encashments)
+
+# Group Кассиры
+
+Возвращает список кассиров
+
+## /cashiers{?devices}
+
+### Данные о кассирах [GET]
+
++ Parameters
+    + devices: `1,2,3` (optional, string) - список идентификаторов устройств
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes (Cashier With DeviceId)
+
+# Group Смены
+
+Возвращает список смен
+
+## /shifts{?from,to,devices,is_closed,limit,offset}
+
+### Список смен [GET]
+
+Возвращает список смен.
+
++ Parameters
+    + from: `2017-10-13T14:15:01.239Z` (optional, string) - Дата "от" (в ISO формате), открытие смены, не localDate, а UTC
+    + to: `2017-10-14T14:15:01.239Z` (optional, string) - Дата "до" (в ISO формате), открытие смены, не localDate, a UTC
+    + offset: 0 (optional, number) - Смещение.
+    + limit: 200 (optional, number) - Количество. (макс. - 1000, по умолчанию - 100).
+    + devices: `1,2,3` (optional, string) - Список идентификаторов устройств (если нужно выбрать смены для конкретных устройств).
+    + is_closed: `true` (optional, boolean) - Если передать истинное значение (например: yes, y, true, 1), то будут показаны только закрытые смены.
+        Если требуется отобразить только открытые смены, то следует передать ложное значение (no, n, false, 0).
+        Если параметр не передан, то будут возвращены все смены (закрытые и открытые)
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes (array[Shift])
+
+# Group Операции
+
+Набор методов для получения информации о статусе выполнения заданий.
+
+Некоторые методы API (например, фискализация чека) возвращают HTTP-статус `202 Accepted`, это означает, что запрос был принят в обработку, но его выполнение может занять некоторое время.
+В ответ на такие запросы в теле приходит идентификатор операции, по которому потом можно получить результат выполнения операции.
+
+## /operations
+
+Возвращает информацию о последних *1000* операциях.
+
+### Список последних операций [GET]
+
++ Response 200 (application/json)
+    + Attributes (array[Operation])
+
+## /operations/{id}
+
++ Parameters
+    + id (number) - Идентификатор операции
+
+### Информация о статусе операции [GET]
+
++ Response 200 (application/json)
+    + Attributes (Operation)
+    
+
+# Group Вебхуки
+
+Предоставляет методы для управления вебхуками.
+
+HTTP-статус ответа на вебхук должен быть в диапазоне 200-299. Если ваш сервер ответит другим кодом, то вебхук не будет
+считаться успешно выполненным и спустя некоторое время будет произведена повторная попытка его выполнения.
+
+При ошибке выполнения вебхука, спустя некоторое время будут предприниматься дополнительные попытки через разные интервалы времени. На текущий момент это:
+
+- сразу
+- через 5 сек
+- через 1 минуту
+- через 1 час
+- через 3 часа
+- через 24 часа
+
+## /webhooks
+
+### Список вебхуков [GET]
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes (array[Webhook])
+
+
+### Создание вебхука [POST]
+
++ Attributes (Webhook Editable)
+
++ Request (application/json)
+
++ Response 201 (application/json)
+    + Body
+
+            {
+                "id": "b0381fe4-4428-4dcb-8169-c8bbcab59626"
+            }
+
+## /webhooks/{id}
+
++ Parameters
+    + id (string) - Идентификатор вебхука, UUIDv4
+
+### Информация о вебхуке [GET]
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes (Webhook)
+
+
+### Редактирование вебхука [PATCH]
+
++ Attributes (Webhook Editable)
+
++ Request (application/json)
+
++ Response 204 (application/json)
+
+### Удаление вебхука [DELETE]
+
++ Response 204
+
+## Пример выполнения вебхука [/#]
+
+Так выглядит тело вебхука при создании нового товара в Кабинете.
+
+### Пример тела вебхука [POST]
+
++ Attributes (Webhook Request)
+
++ Request (application/json)
+
++ Response 204
+
+
+# Group Пользователи
+
+Для создания пользователей требуется `Application` авторизация. Пользователи, создаваемые приложениями - это
+полноценные аккаунты Кабинета, но с небольшими отличиями:
+
+- подтверждение аккаунта в Кабинете не требуется (аккаунт уже активирован)
+- при создании аккаунта, пользователь не получит приветственных писем о регистрации
+- для аккаунта пароль генерируется автоматически, приложение не может его указать/изменить
+- для пользователя автоматически генерируется Bearer токен, которым может пользоваться приложение, для выполнения запросов от имени этого аккаунта
+
+Пользователь, при желании, может получить доступ к аккаунту через процедуру восстановления пароля.
+
+> При регистрации пользователей крайне рекомендуется использовать адрес, который использовался пользователем при регистрации в сервисе самого приложения.
+    При регистрации аккаунтов на рандомные/временные адреса, вы поставите под угрозу безопасность пользователя.
+
+## /users
+
+### Создание пользователя [POST]
+
++ Attributes
+    + name: Василий (string, required, sample) - Имя пользователя
+    + email: mail@example.com (string, required, sample) - E-mail пользователя
+
++ Request (application/json)
+
++ Response 201 (application/json)
+    + Attributes
+        + userId: 58835 (number, sample) - Идентификатор пользователя
+        + accessToken: `523cbe0f-99da-4f31-91b7-3f9754aeb04b` (string, sample) - Токен доступа (Bearer) пользователя, сгенерированный для приложения, которое выполнило запрос
+
+
+# Group Профиль
+
+Набор методов для получения информации об аккаунте пользователя
+
+## /user/pin
+
+### Получение кода для привязки кассы [GET]
+
++ Response 200 (application/json)
+    + Attributes
+        + code: 42638 (number, sample) - Пятизначный код привязки, который нужно ввести на устройстве
+        + ttl: 1773 (number, sample) - Оставшееся время жизни кода в секундах
+
+
+# Group Карты, купоны
+
+Методы для управления купонами и картами(Далее - карты)
+
+## /coupons
+
+### Получение списка карт [GET]
+
++ Response 200 (application/json)
+    + Attributes(array[Coupon])
+
+### Создание карты [POST]
+
++ Attributes (Coupon Editable)
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes(Coupon)
+
+## /coupons/{id}
+
++ Parameters
+    + id (number) - Идентификатор карты
+
+### Получение данных карты [GET]
+
++ Response 200 (application/json)
+    + Attributes(Coupon)
+
+### Обновление карты [PATCH]
+
++ Request (application/json)
+    + Attributes (Coupon Editable)
+
++ Response 204
+
+### Удаление карты [DELETE]
+
++ Response 204
+
+
+
+# Group Скидки
+
+Методы для управления скидками
+
+## /discounts
+
+### Получение списка скидок [GET]
+
++ Response 200 (application/json)
+    + Attributes(array[Discount])
+
+
+### Создание скидки [POST]
+
++ Attributes (Discount Editable)
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes
+        + id: 123 (number, sample) - Идентификатор созданной скидки
+
+## /discounts/{id}
+
++ Parameters
+    + id (number) - Идентификатор скидки
+
+
+### Получение данных скидки [GET]
+
++ Response 200 (application/json)
+    + Attributes (Discount)
+
+
+### Обновление скидки [PATCH]
+
++ Request (application/json)
+    + Attributes (Discount Editable)
++ Response 204
+
+
+### Удаление скидки [DELETE]
+
++ Response 204
+
+
+# Group Клиенты
+
+Методы для управления клиентами
+
+## /clients
+
+### Список клиентов [GET]
+
++ Response 200 (application/json)
+    + Attributes(array[Client])
+
+### Создание клиента [POST]
+
++ Attributes (Client Editable)
+
++ Request (application/json)
+
++ Response 200 (application/json)
+    + Attributes(Client)
+
+## /clients/{id}
+
++ Parameters
+    + id (number) - Идентификатор клиента
+
+### Информация о клиенте [GET]
+
++ Response 200 (application/json)
+    + Attributes(Client)
+
+### Обновление клиента [PATCH]
+
++ Request (application/json)
+    + Attributes (Client Editable)
+
++ Response 200
+    + Attributes (Client)
+
+### Удаление клиента [DELETE]
+
++ Response 204
+
+
+
+# Data Structures
+
+## TaxEnum (enum)
++ 0 (number)
++ 18 (number)
++ 10 (number)
++ 110 (number)
++ 118 (number)
++ null () - Без НДС
+
+## TaxEnum2 (enum)
++ `NDS_NO_TAX` (string) - Без НДС
++ `NDS_0` (string) - НДС 0
++ `NDS_10` (string) - НДС 10
++ `NDS_18` (string) - НДС 18
++ `NDS_10_CALCULATED` (string) - НДС 10/110
++ `NDS_18_CALCULATED` (string) - НДС 18/118
+
+## TaxEnumDepartment (enum)
++ `0` (number)
++ `18` (number)
++ `10` (number)
++ `110` (number)
++ `118` (number)
++ `null` () - Без НДС
++ `-1` (number) - Товары в отделе имеют смешанные НДС
+
+## TaxEnumDepartment2 (enum)
++ `NDS_NO_TAX` (string) - Без НДС
++ `NDS_0` (string) - НДС 0
++ `NDS_10` (string) - НДС 10
++ `NDS_18` (string) - НДС 18
++ `NDS_10_CALCULATED` (string) - НДС 10/110
++ `NDS_18_CALCULATED` (string) - НДС 18/118
++ `NDS_MIXED` (string) - Товары в отделе имеют смешанные НДС
+
+## ProductTypeEnum (enum)
++ COUNTABLE - Штучный
++ SCALABLE - Весовой
++ ALCOHOL - Алкогольный
+
+## ReceiptTypeEnum (enum)
++ `SALE` (string) - Приход
++ `REFUND` (string) - Возврат прихода
++ `OUTFLOW` (string) - Расход
++ `OUTFLOW_REFUND` (string) - Возврат расхода
+
+## CorrectionReportTypeEnum (enum)
++ `SALE` (string) - Приход
++ `REFUND` (string) - Возврат прихода
+
+## ReceiptPaymentType (enum)
++ CASH (string)
++ CASHLESS (string)
+
+## CorrectionPaymentType (enum)
++ CASH (string)
++ CASHLESS (string)
++ BARTER (string)
+
+## ReceiptPositionTypeNoAlcohol (enum)
++ COUNTABLE (string)
++ SCALABLE (string)
+
+## ReceiptPositionType (ReceiptPositionTypeNoAlcohol)
++ ALCOHOL (string)
+
+## EncashmentType (enum)
++ `MONEY_IN` (string) - Операция внесения
++ `MONEY_OUT` (string) - Операция изъятия
+
+## SNOType (enum)
++ `DEFAULT` (string) - Общая
++ `SIMPLE` (string) - Упрощенная доход
++ `SIMPLE_WO` (string) - Упрощенная доход минус расход
++ `ENVD` (string) - Единый налог на вмененный доход
++ `AGRICULT` (string) - Единый сельскохозяйственный на
++ `PATENT` (string) - Патентная система налогообложения
+
+## OperationStatusEnum (enum)
++ `PENDING` (string) - В обработке
++ `IN_PROGRESS` (string) - Задача принята в обработку (например, устройство приняло чек на фискализацию)
++ `SUCCESS` (string) - Завершено успешно
++ `ERROR` (string) - Завершено с ошибкой
+
+## WebhookActionEnum (enum)
++ CREATE (string) - Создание сущности
++ UPDATE (string) - Изменение сущности
++ DELETE (string) - Удаление сущности
+
+## WebhookTypeEnum (enum)
++ PRODUCT (string) - Товар
++ DEVICE (string) - Устройство, в частности касса. Может быть подключен, изменен или отключен
++ ENCASHMENT (string) - Внесение(изъятие) денег в/с кассу
++ SHIFT (string) - Открытие, закрытие смены
++ RECEIPT (string) - Чеки, пробитые кассой "оффлайн" и из внешних источников(интернет-магазины, ..)(успешно зафискализированные)
++ OPERATION (string) - Операции. В том числе созданные при фискализации. В отличие от чеков, операции несут полную информацию о фискализации, например об ошибках
+
+## DiscountTypeEnum (enum)
++ PERCENT (string) - Процентная скидка
++ SUM (string) - Фиксированная скидка
+
+## DiscountModeEnum (enum)
++ AUTO (string) - Автоматичексий режим
++ MANUAL (string) - ручной режим
+
+## TaxModeEnum (enum)
++ `DEFAULT` (string) - Общая
++ `SIMPLE` (string) - Упрощенная
++ `SIMPLE_WO` (string) - УСН доход-расход
++ `ENVD` (string) - ЕНВД
++ `AGRICULT` (string) - ЕСН (ЕСХН)
++ `PATENT` (string) - Патент
+
+## WorkModeEnum (enum)
++ `CIPHER` (string) - Шифрование
++ `EXCISE` (string) - Подакцизный товар
++ `SERVICES` (string) - Расчет за услуги
++ `GAMBLING` (string) - Азартные игры
++ `LOTTERY` (string) - Лотерея
++ `PAY_AGENTS` (string) - Платежный агент
+
+## AgentsEnum (enum)
+ - `BANK_PAY_AGENT` (string) -  Банковский платежный агент
+ - `BANK_PAY_SUB_AGENT` (string) -  Банковский платежный субагент
+ - `PAY_AGENT` (string) -  Платежный агент
+ - `PAY_SUB_AGENT` (string) -  Платежный субагент
+ - `ATTORNEY` (string) -  Поверенный
+ - `COMMISSIONAIRE` (string) -  Комиссионер
+ - `AGENT` (string) -  Агент
+
+## CorrectionTypeEnum (enum)
++ byYourself (string) - Самостоятельно
++ byInstruction (string) - По предписанию
+
+## DeviceModelCodeEnum (enum)
++ `DREAMKAS_F` (string) - касса Дримкас-ф
+
+
+## ProductV1 (Product Editable Properties Common Version1)
++ createdAt: `2017-05-05T14:15:01.239Z` (string, sample) - Дата создания
++ updatedAt: `2017-05-05T14:15:01.239Z` (string, sample) - Дата последнего изменения
+
+## ProductV2 (Product Editable Properties Common Version2)
++ createdAt: `2017-05-05T14:15:01.239Z` (string, sample) - Дата создания
++ updatedAt: `2017-05-05T14:15:01.239Z` (string, sample) - Дата последнего изменения
+
+## Product Editable Properties Common Version1 (Product Editable Properties Common Version)
++ barcodes: `AB_1234`, 00000001 (array[string], sample) - Штрихкоды. Если длина 8, 12 или 13, то проверяется на контрольную сумму
++ tax (TaxEnum) - Налог
+
+## Product Editable Properties Common Version2 (Product Editable Properties Common Version)
++ barcodes: 12341238 (array[string], sample) - Штрихкоды. Только длины 8, 12 или 13. Проверяется на контрольную сумму
++ vendorCodes: AB_1234 (array[string], sample) - Артикулы, никаких валидаций
++ tax (TaxEnum2) - Налог
+
+## Product Editable Properties Common Version (object)
++ id: `b0381fe4-4428-4dcb-8169-c8bbcab59626` (string, sample) - UUID товара (если не передан, UUID будет сгенерирован автоматически).
+    Указывать UUID можно только при создании товара. Изменить идентификатор товара после создания нельзя.
++ name: `Новый товар` (string, default) - Название
++ type: COUNTABLE (ProductTypeEnum, default) - Тип продукта
++ departmentId (number) - ID отдела магазина
++ quantity: 1000 (number, sample) - Единица товара
++ prices (array[Product Price]) - Цена для каждого устройства
++ price (number, optional) - Цена товара для новых устройств (если не указать, будет взято максимальное значение из `prices`)
++ meta (enum) - Дополнительные данные о товаре, в зависимости от типа
+    - (Product Meta Alcohol)
+
+## Product Price (object)
++ deviceId: 1 (number, sample) - ID устройства
++ value: 1200 (number, sample) - Цена в копейках
+
+## Product Meta Alcohol (object)
++ code: 0000000000001 (string, sample) - Алкокод
++ typeCode: 123 (string, sample) - Код вида алкогольной продукции
++ volume: 0 (number, default) - Объем в миллилитрах
+    Если передан `0`, то это означает, что алкоголь поставляется в кегах/тарах
++ alc: 400 (number, sample) - Содержание алкоголя в десятых процента (например, `98 = 9.8%`), значение может быть от 1 до 1000.
+
+## Shop (Shop Editable Properties)
++ id: 1 (number, sample) - Идентификатор
+
+## Shop Editable Properties
++ name: Магазин №1 (string, sample) - Название магазина
++ sort: 999 (number, sample) - Индекс сортировки (для отображения)
+
+## Device (Device Editable Properties)
++ id (number) - Идентификатор
++ timezoneOffset(number) - Часовой пояс кассы , смещение в минутах от UTC
+
+## Device Editable Properties (object)
++ name (string) - Название
++ groupId (number) - Идентификатор магазина
++ sort (number) - Индекс сортировки (для отображения)
+
+## Application (Application Editable Properties)
++ id (number) - Идентификатор
++ secret: `276421f5-0a84-4c2c-a84d-96eb8b57dd55` (string, sample) - Секретный ключ приложения
++ createdAt: `2017-04-24T10:12:55.357Z` (string, sample) - Дата создания приложения
+
+## Application Editable Properties (object)
++ name: `Интеграция с 1С` (string, sample) - Название приложения
++ isPublic: false (boolean, default) - Флаг отображения в каталоге
++ isActive: true (boolean, default) - Флаг активности
++ meta (object) - Дополнительная информация о приложении
+
+## Integration (object)
++ id (number) - Идентификатор
++ token (string) - Токен, выданный приложению и который им используется для выполнения запросов (`access_token`)
++ appId (number) - Идентификатор приложения, которому был выдан токен
+
+## Receipt (object)
++ query (Receipt Encashment Query) - Фактические значения, с которыми был выполнен запрос
++ data (array[Receipt Data]) - Данные о продажах
+
+## Receipt Encashment Query (object)
++ from: `2017-10-13T14:15:01.239Z` (string) - Дата начала
++ to: `2017-10-14T14:15:01.239Z` (string) - Дата окончания
++ limit (number) - Количество
++ offset (number) - Смещение
++ devices: `["1"]` (string) - Список идентификаторов устройств
+
+## Receipt Data (object)
++ id (number) - Идентификатор чека
++ type (ReceiptTypeEnum) - Тип чека (Продажа или Возврат)
++ amount (number) - Сумма чека
++ discount (number) - Сумма скидок (уже учтена в amount, т.е. клиент заплатил столько, сколько указано amount)
++ deviceId (number) - Идентификатор устройства, кассы
++ shopId (number) - Идентификатор магазина
++ shiftId (number) - Номер смены, уникален в рамках кассы
++ number (number) - Номер чека в смене
++ localDate (string) - Локальное время кассы во время пробития чека
++ date (string) - Время пробития чека (в ISO)
++ payments (array[Receipt Data Payment]) - Детальная информация об оплате
++ positions (array[Receipt Data Position]) - Позиции в чеке
++ cashier (Cashier) - Информация о кассире
++ checkURL: `www.nalog.ru` (string) - Сайт проверки чека
++ fiscalDocumentNumber: `200` (string) - Фискальный номер документа
++ fiscalDocumentSign: `2147483647` (string) - Фискальный признак документа
++ fnNumber: `9999078900001712` (string) - Номер фискального накопителя
++ registryNumber: `0000000001056589` (string) - Регистрационный номер ККТ
+
+## Receipt Data Payment (object)
++ type (ReceiptPaymentType) - Тип оплаты (CASH - нал, CASHLESS - безнал) = ['CASH', 'CASHLESS'],
++ amount (number) - Сумма, которая была оплачена этим типом
+
+## Receipt Data Position (object)
++ id (string) - Идентификатор товара
++ name (string) - Кешированное название товара
++ type: COUNTABLE (ReceiptPositionType) - Тип товара - Алкогольный, Штучный, Весовой = ['ALCOHOL', 'COUNTABLE', 'SCALABLE']
++ quantity (number) - Количество проданного товара в тысячных
++ price (number) - Стоимость единицы товара (сумма позиции = price * quantity)
++ discount (number) - Величина скидки (суммарная по позиции, а не по единице товара)
++ barcode (string) - Штрихкод, отсканированный на момент продажи
++ exciseBarcode (string) - bottleBarcode (PDF417), отсканированный в момент продажи бутылки
++ vendorCode (string) - Артикул, по которому нашли товар и продали
++ tax: `NDS_18` (TaxEnum2, sample) - Тип НДС на момент проджаи
++ departmentId (number) - Идентификатор отдела, в котором был товар в Кабинете на момент продажи. null для товаров в "Без отдела"
+
+## Department Editable (object)
++ name (string) - Название отдела
++ tax (TaxEnumDepartment) - Налог
+
+## Department (Department Editable)
++ id (number) - Идентификатор отдела
+
+## Department Editable v2(object)
++ name (string) - Название отдела
++ tax (TaxEnumDepartment2) - Налог
+
+## Department v2(Department Editable v2)
++ id (number) - Идентификатор отдела
+
+## Encashments (object)
++ query (Receipt Encashment Query) - Фактические значения, с которыми был выполнен запрос
++ data (array[Encashment Data]) - Данные об изъятиях и внесениях
+
+## Encashment Data (object)
++ deviceId (number) - Идентификатор устройства,
++ shopId (number) - Идентификатор магазина,
++ type (EncashmentType) - Тип операции,
++ shiftId (number) - Номер смены, уникален в рамках одной кассы,
++ cashier (Cashier) - Информация о кассире,
++ sum (number) - Сумма операции, в абсолютном значении,
++ localDate (string) - Локальное время кассы во время операции внесения/изъятия
++ date (string) - Время в формате ISO
+
+## Cashier (object)
++ tabNumber: 88990 (number, sample) - Табельный номер, уникален в рамках кассы
++ name: `Иванов Петр Олегович` (string, sample) - Имя
++ inn: `1234567890` (string, sample) - ИНН
+
+## Cashier With DeviceId (Cashier)
++ deviceId (number) - Идентификатор устройства, за которым работал кассир
+
+## Shift (object)
++ id: `5949581a02c08a286420c6c7` (string, sample) - Идентификатор смены в базе, не является номером смены
++ shiftId: `1` (number, sample) - Номер смены, это число отображается в чеке
++ deviceId: `1` (number, sample) - Идентификатор устройства
++ openedAt: `2017-06-20 12:01:47.990Z` (string, sample) - Локальное время открытия смены (по времени устройства)
++ openedAtUTC: `2017-06-20 11:01:47.990Z` (string, sample) - UTC время открытия смены (по времени устройства)
++ closedAt: `2017-06-20 17:04:22.456Z` (string, sample) - Локальное время закрытия смены (по времени устройства). **Отсутствует у открытых смен**
++ closedAtUTC: `2017-06-20 16:04:22.456Z` (string, sample) - UTC время закрытия смены (по времени устройства). **Отсутствует у открытых смен**
++ cashOnOpen: `24445` (number, sample) - Баланс на момент открытия смены
++ cashOnClose: `44425` (number, sample) - Баланс на момент закрытия смены. **Отсутствует у открытых смен**
++ isClosed: `true` (boolean, sample) - Флаг, обозначающий, что смена закрыта.
++ cashier (Cashier) - Кассир
+
+## Receipt Request (object)
++ deviceId: 1385 (number, sample, required) - Идентификатор устройства, которое будет использовано для фискализации
++ type: SALE (ReceiptTypeEnum, default) - Тип операции
++ timeout: 180 (number, sample) - Таймаут фискализации в секундах (по умолчанию - 300 секунд). Если в течение этого времени не удастся произвести фискализацию, то операция будет отменена с ошибкой.
++ taxMode (SNOType, required) - Система налогообложения
++ positions (array[Receipt Request Position], required) - Позиции
++ payments (array[Receipt Request Payment], required) - Информация об оплате
++ attributes (object, required) - Информация о покупателе. По этим параметрам ОФД отправит электронный чек покупателю
+    + email: `john.smith@example.com` (string, sample) - Адрес электронной почты. Имеет преимущество перед телефоном
+    + phone: `+71239994499` (string, sample) - Номер телефона (в формате +7XXXXXXXXXX). Если не указана почта, будет использован номер телефона
++ total (object, required) - Сумма чека
+    + priceSum: 9000 (number, sample) - Сумма в копейках по всем позициям
+
+## Receipt Request Position (object)
++ name: `Шоколад Сникерс` (string, required, sample) - Наименование
++ type: COUNTABLE (ReceiptPositionTypeNoAlcohol, default) - Тип товара
++ quantity: 2 (number, required, sample) - Количество (для штучного - штуки, для весового - граммы)
++ price: 4500 (number, required, sample) - Цена в копейках за единицу расчета
++ priceSum: 9000 (number, sample) - Цена позиции в копейках (если не передан, то касса посчитает автоматически)
++ tax: NDS_18 (TaxEnum2, sample) - Тип НДС (если не указан, то будет взят из настроек устройства)
++ taxSum: 1620 (number, sample) - Сумма НДС (если не указан, то будет вычислен устройством)
+
+## Receipt Request Payment (object)
++ sum: 9000 (number, sample, required) - Размер оплаты
++ type: CASHLESS (ReceiptPaymentType, default) - Тип оплаты
+
+## Operation Header (object)
++ id: 5956889136fdd7733f19cfe6 (string, sample) - Идентификатор операции (см. API Операции)
++ createdAt: `2017-06-20 12:01:47.990Z` (string, sample) - Дата формирования
++ status (OperationStatusEnum) - Статус операции
+
+## Operation (Operation Header)
++ status: ERROR (OperationStatusEnum, sample) - Статус операции
++ completedAt: `2017-06-20 12:03:12.440Z` (string, sample) - Дата завершения
++ data (object) - Дополнительные данные
+    + error (object) - Ошибка (если операция завершилась с ошибкой)
+        + code: NeedUpdateCash (string, sample) - Код ошибки
+        + message: `Требуется обновление кассы` (string, sample) - Сообщение об ошибки
+
+## Webhook Types (object)
++ products (boolean) - Товары. Создание, изменение и удаление
++ devices (boolean) - Устройства, в частности кассы
++ encashments (boolean) - Внесения и изъятия из кассы
++ receipts (boolean) - Чеки, как пробитые из кассы кассиром, так и чеки из интернет-магазина
++ shifts (boolean) - Новые смены, закрытие смены
++ operations (boolean) - Операции, в частности чеки из интернет-магазинов
++ deviceRegistrations (boolean) - Изменения регистрационных данных ККТ
+
+## Webhook Editable (object)
++ url (string) - Ссылка, куда Кабинет отправит запрос
++ types (Webhook Types) - Типы объектов, на которых можно подписаться
++ isActive (boolean, optional) - Состояние вебхука. Если не активен - не будет вызываться
+
+## Webhook (Webhook Editable)
++ id (string) - Идентификатор вебхука, UUIDv4
+
+## Webhook Request (object)
++ action (WebhookActionEnum) - Тип действия
++ type (WebhookTypeEnum) - Тип сущности
++ data (ProductV2) - Объект измененной сущности. Содержит поля сущности, как описано это в документации выше. В случае удаления - приходит с ключом id
+
+## Coupon Editable (object)
++ name: `Золотая карты покупателя, 10%` (string) - Название карты
++ from: `AB1234` (string) - Начало диапазона
++ to: `YZ4321` (string) - Конец диапазона
++ isActive: true (boolean) - Состояние карты
++ imageId (number) - Идентификатор изображения
+
+## Coupon (Coupon Editable)
++ id (number) - Идентификатор карты
++ image (object)
+    + card (string) - URL адрес на изборажение
+
+## Discount Result (object)
++ type (DiscountTypeEnum) - Тип скидки
++ value (number) - Величина скидки. Измеряется в копейках и в сотых долях процента соответственно
+
+## Product Short Form (object)
++ id (string, required) - Идентификатор товара, UUIDv4
++ name (string, optional) - Наименование товара
++ barcodes (array[number], optional) - Штрихкоды
+
+## Discount Targets (object)
++ products (array[Product Short Form]) - Список товаров, на которых действует скидка. Если пустой, то скидка ни на что не будет действовать
++ devices (array[number]) - Список идентификаторов устройств, на которых будет задействована скидка
++ allDevices: false (boolean, default) - Применить скидку на всех устройствах. Также, значение `true` позволяет применять скидку для новых(привязанных) касс автоматически. Значение true имеет приоритет над devices
++ allProducts: false (boolean, default) - Применить скидку для всех товаров. Также, значение `true` позволяет применять скидку для новых(созданных) товаров автоматически. Значение true имеет приоритет над products
+
+## Discount Editable (object)
++ name: `Скидка на все товары 5%` (string) - Название скидки
++ mode (DiscountModeEnum) - Режим скидки
++ result (Discount Result) - Результат скидки
++ isActive: true (boolean) - Статус активности скидки
++ targets (Discount Targets, optional) - на что действует скидка
++ conditions (array[Discount Type]) - Массив условий
+
+## Discount (Discount Editable)
++ id: 123 (number, sample) - Идентификатор скидки
+
+## Discount Type Card Range (object)
++ type: `CARD_RANGE` (string) - Тип условия
++ data (object)
+    + couponIds: [1] (array[number]) - Список идентификаторов карт, на которых действует скидка
+
+## Discount Type Date Range (object)
++ type: `DATE_RANGE` (string) - Тип условия
++ data (object)
+    + from: `2017-09-01` (string, optional) - Дата начала действия скидки. Может быть `null` - действует уже сейчас
+    + to: `2017-10-01` (string, optional) - Дата окончания скидки. Если `null`, действет бессрочно
+
+## Discount Type Time Range
++ type: `TIME_RANGE` (string) - Тип условия
++ data (object)
+    + from: `20:00` (string, optional) - Дата начала действия скидки. Может быть `null` - действует с 00:00
+    + to: `23:59` (string, optional) - Дата окончания скидки. Если `null`, действет до конца суток
+
+## Discount Type Week Days
++ type: `WEEKDAYS` (string) - Тип условия
++ data (object)
+    + days: [0] (array[number]) - Дни недели, для которых действует скидка. 0 - воскресенье, 6 - суббота. 7 - некорректное значение
+
+## Discount Type Purchase Sum
++ type: `PURCHASE_SUM` (string) - Тип условия
++ data (object)
+    + min: 100000 (number) - Минимальная сумма покупки, после которой действует скидка. В копейках
+
+## Discount Type (enum)
+- (Discount Type Card Range)
+- (Discount Type Date Range)
+- (Discount Type Time Range)
+- (Discount Type Week Days)
+- (Discount Type Purchase Sum)
+
+## Client (Client Editable)
++ createdAt: `2017-11-14` (string, required, sample) - Дата создания клиента в формате ГГГГ-ММ-ДД
++ avatar: `https://kabinet-static.dreamkas.ru/assets/avatars/24.svg` (string, required, sample) - Ссылка на аватар
++ seed: `84736438` (number, required, sample) - Случайное число для выбора аватара (ID аватара = seed % 24). Можно явно выставить значение в диапазоне [0;23], чтобы явно выбрать аватар для клиента.
+
+## Client Editable (object)
++ id: `276421f5-0a84-4c2c-a84d-96eb8b57dd55` (string, sample) - Идентификатор клиента в формате UUID (любой версии). Если не передан, будет сгенерирован автоматически.
++ phone: `79441118833` (string, sample) - Номер телефона
++ email: `user@example.com` (string, sample) - Адрес электронной почты
++ name: `Павел` (string, sample) - Имя
+
+## Device Registration Info (object)
++ shopInfo (object)
+    + address (string, required) - Адрес осуществления расчетов
+    + realAddress (string, required) - Место осуществления расчетов
+    + inn (string, required) - ИНН
+    + legalName (string, required) - Наименование организации
+    + shopName (string, required) - Название магазина
+
++ kktRegistrationInfo (object)
+    + autonomic (boolean, required) - Признак автономности. Синоним слова "оффлайн"
+    + taxModes (array[TaxModeEnum], required) - Системы налогооблажения
+    + workMode (array[WorkModeEnum], required) - Признаки
+    + agents (array, optional) - платежные агенты
+        + (object)  - Тип агента
+            + type (AgentsEnum)
+    + ofdProvider (object, required) - Данные ОФД
+        + name: `СКБ Контур` (string) - Название
+        + inn: `6663003127` (string) - ИНН
+        + serverHost: `ofd.kontur.ru` (string) - Хост сервера
+        + serverPort: `7777` (string) - Порт сервера
+        + checkURL: `https//cash.kontur.ru` (string) - адрес проверки чека
+    + registryNumber: `0000000001023356` (string, required) - Регистрационный номер ККТ
+
+## Receipt Correction (object)
++ type (CorrectionReportTypeEnum) - Тип чека коррекции
++ taxMode (array[SNOType]) - Система Налогооблажения
++ payments (array) - типы платежей
+    + (object)
+        + type (CorrectionPaymentType)
+        + value (number)
++ correctionType (CorrectionTypeEnum) - Тип коррекции
++ correctionBasis (string) - Основание для коррекции
++ correctionDate (string) - Дата коррекции, в формате YYYY-MM-DD
++ correctionBasisNumber (string) - Номер документа основания для коррекции
++ taxes (array)
+    + (object)
+        + tax (TaxEnum2)
+        + value (number)
