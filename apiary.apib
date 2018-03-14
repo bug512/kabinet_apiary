@@ -122,7 +122,7 @@ HOST: https://kabinet.dreamkas.ru/api
 
 1. Наличие кассы "Дримкас-Ф"
 2. Привязка кассы Кабинету
-3. Наличие ФН в кассе, в боевом режиме: ни учебный, ни ЕНВД не подойдет. Если это критично, пишите письмо на имя PO - e.uskov@dreamkas.ru
+3. Наличие ФН в кассе, в боевом режиме: ни учебный, ни ЕНВД не подойдет. Если это критично, пишите письмо по адресу `k@dreamkas.ru`
 
 Данная операция является асинхронной, так как ККТ Дримкас-Ф выходит на связь раз в минуту, или вообще может не иметь сети интернет на момент запроса со стороны Интернет-Магазина(далее - ИМ)
 
@@ -141,8 +141,8 @@ HOST: https://kabinet.dreamkas.ru/api
     подробнее в разделе webhooks, с учетом, что в теле вебхука в `data` будет то же самое, что Вы получаете от `/api/operations/:id`
 + Убедиться, что получили статус `SUCCESS`
 
-
 ## Набор всех возможных ошибок:
+
 `REM_ID_IS_EMPTY` - отсутствует rem id(внутренняя ошибка)
 
 `TAX_MODE_IS_EMPTY` - не указана СНО
@@ -180,7 +180,6 @@ HOST: https://kabinet.dreamkas.ru/api
 - Вы видите `ERROR` и не понимаете, что с ним делать? В свойстве `data` указана подробная причина проблемы. Если указано error: null - пишите разработчикам - [t.me/apidreamkas](https://t.me/apidreamkas)
 - Смена на кассе закрывается в самый ненужный момент? Укажите в настройках ККТ включить опцию "автооткрытие смены"
 - Отправка чека два раза подряд. Для Кабинета каждое отправленное задание будет проходить обработку. Вам необходимо контролировать это на своей стороне.
-
 
 
 
@@ -308,7 +307,7 @@ ALCOHOL    | 1000     | 1 бутылка/банка
 
 
 + Response 200 (application/json)
-    + Attributes (array[Product])
+    + Attributes (array[ProductV1])
 
 
 ### Создание товаров [POST]
@@ -423,7 +422,6 @@ ALCOHOL    | 1000     | 1 бутылка/банка
     + limit: 100 (optional, number) - Количество записей в ответе, по умолчанию 100
     + offset: 0 (optional, number) - Смещение
 
-
 + Response 200 (application/json)
     + Attributes (array[ProductV2])
 
@@ -496,6 +494,7 @@ ALCOHOL    | 1000     | 1 бутылка/банка
 + Request (application/json)
 
 + Response 204
+
 
 
 ## /v2/products/{id}
@@ -604,12 +603,22 @@ ALCOHOL    | 1000     | 1 бутылка/банка
 
 ### Список устройств [GET]
 
++ Request (application/json)
+
 + Response 200 (application/json)
     + Attributes (array[Device])
 
+
+### Создание кассы (доступно только для приложений) [POST]
+
++ Attributes (object)
+    + uuid (string) - UUID кассы
+    + modelCode (DeviceModelCodeEnum) - На данный момент доступен только Дримкас-ф
+    + callback (string) - URL, куда будет вызван вебхук после подключения кассы
+
 + Request (application/json)
 
-+ Response 204
++ Response 202
 
 
 ## /devices/{id}
