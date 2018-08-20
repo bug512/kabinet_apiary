@@ -1445,7 +1445,7 @@ HTTP-статус ответа на вебхук должен быть в диа
 ## Receipt Request (object)
 + deviceId: 1385 (number, sample, required) - Идентификатор устройства, которое будет использовано для фискализации
 + type: SALE (ReceiptTypeEnum, default) - Тип операции
-+ timeout: 180 (number, sample) - Таймаут фискализации в секундах (по умолчанию - 300 секунд). Если в течение этого времени не удастся произвести фискализацию, то операция будет отменена с ошибкой.
++ timeout: 5 (number, sample) - Таймаут фискализации в минутах (не менее 5 минут, по умолчанию - 5 минут). Если в течение этого времени не удастся произвести фискализацию, то операция будет отменена с ошибкой.
 + taxMode (SNOType, required) - Система налогообложения
 + positions (array[Receipt Request Position], required) - Позиции
 + payments (array[Receipt Request Payment], required) - Информация об оплате
