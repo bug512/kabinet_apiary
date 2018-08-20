@@ -1447,7 +1447,7 @@ HTTP-статус ответа на вебхук должен быть в диа
 + type: SALE (ReceiptTypeEnum, default) - Тип операции
 + timeout: 5 (number, sample) - Таймаут фискализации в минутах (не менее 5 минут, по умолчанию - 5 минут). Если в течение этого времени не удастся произвести фискализацию, то операция будет отменена с ошибкой.
 + taxMode (SNOType, required) - Система налогообложения
-+ positions (array[Receipt Request Position], required) - Позиции
++ positions (array[Receipt Request Position], required) - Позиции, максимальное количество равно 100
 + payments (array[Receipt Request Payment], required) - Информация об оплате
 + attributes (object, required) - Информация о покупателе. По этим параметрам ОФД отправит электронный чек покупателю
     + email: `john.smith@example.com` (string, sample) - Адрес электронной почты. Имеет преимущество перед телефоном
